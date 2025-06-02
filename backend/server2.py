@@ -108,7 +108,6 @@ def recognize_multiple_gestures(video_path, motion_threshold=0.02, pause_duratio
     pause_buffer = []
     pause_start_frame = None
     prev_keypoints = None
-
     motion_buffer = deque(maxlen=smoothing_window)  # smoothing buffer for motion
 
     while cap.isOpened():
@@ -195,66 +194,6 @@ def recognize_multiple_gestures(video_path, motion_threshold=0.02, pause_duratio
             print(f"Gesture Duration: {duration:.2f} seconds")
 
     cap.release()
-# video_path = '/kaggle/input/a-lotvideo/A_Lot.mp4'
-# recognize_multiple_gestures(video_path)
-
-# def process_video(cap):
-#     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-#     frame_idx, gesture_active = 0, False
-#     sequence, pause_buffer = [], []
-#     pause_start_frame, gesture_start_frame = None, None
-#     motion_buffer, prev_keypoints = deque(maxlen=SMOOTHING_WINDOW), None
-#     results_list = []
-
-#     while cap.isOpened():
-#         ret, frame = cap.read()
-#         if not ret:
-#             break
-
-#         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-#         image.flags.writeable = False
-#         results = holistic.process(image)
-#         keypoints = extract_landmarks(results)
-
-#         motion = np.linalg.norm(keypoints - prev_keypoints) if prev_keypoints is not None else 0
-#         motion_buffer.append(motion)
-#         avg_motion = np.mean(motion_buffer)
-
-#         if avg_motion >= MOTION_THRESHOLD:
-#             if pause_start_frame is not None:
-#                 pause_duration = (frame_idx - pause_start_frame) / fps
-#                 if pause_duration <= PAUSE_DURATION_SEC:
-#                     sequence.extend(pause_buffer)
-#                 else:
-#                     if len(sequence) >= MIN_SEQ_LEN:
-#                         gesture_seq = np.array(sequence)
-#                         label, dist = recognize_sign(gesture_seq)
-#                         results_list.append({'label': label, 'confidence': float(dist)})
-#                     sequence = []
-#                 pause_buffer = []
-#                 pause_start_frame = None
-
-#             if not gesture_active:
-#                 gesture_active = True
-#                 gesture_start_frame = frame_idx
-#             sequence.append(keypoints)
-#         else:
-#             if gesture_active:
-#                 if pause_start_frame is None:
-#                     pause_start_frame = frame_idx
-#                 pause_buffer.append(keypoints)
-
-#         prev_keypoints = keypoints
-#         frame_idx += 1
-
-#     if gesture_active and len(sequence) >= MIN_SEQ_LEN:
-#         sequence.extend(pause_buffer)
-#         gesture_seq = np.array(sequence)
-#         label, dist = recognize_sign(gesture_seq)
-#         results_list.append({'label': label, 'confidence': float(dist)})
-
-#     cap.release()
-#     return results_list
 
 @app.route('/predict_video', methods=['POST'])
 def predict_video():

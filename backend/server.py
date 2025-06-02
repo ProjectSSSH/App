@@ -18,14 +18,21 @@ from werkzeug.utils import secure_filename
 from tempfile import NamedTemporaryFile
 import traceback
 from collections import deque
+from flask_socketio import SocketIO, emit
+from flask import request
 
-sequence = []
-pause_buffer = []
-gesture_active = False
-pause_start_frame = None
-prev_keypoints = None
-motion_buffer = deque(maxlen=5)
-frame_idx = 0
+
+def init_client_state():
+    return {
+        'sequence': [],
+        'pause_buffer': [],
+        'gesture_active': False,
+        'pause_start_frame': None,
+        'prev_keypoints': None,
+        'motion_buffer': deque(maxlen=5),
+        'frame_idx': 0
+    }
+
 
 SEQ_DIM = 225
 EMBED_DIM = 128
@@ -33,8 +40,11 @@ MOTION_THRESHOLD = 0.02
 PAUSE_DURATION_SEC = 1.0
 SMOOTHING_WINDOW = 5
 MIN_SEQ_LEN = 20
+client_states = {}
+
 
 app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 def build_embedding_model():
     inp = Input(shape=(None, SEQ_DIM))
@@ -175,63 +185,160 @@ def predict_video():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/predict_frame', methods=['POST'])
-def predict_frame():
-    global frame_idx, gesture_active, pause_start_frame, prev_keypoints
-    global motion_buffer, sequence, pause_buffer
+# @app.route('/predict_frame', methods=['POST'])
+# def predict_frame():
+#     global frame_idx, gesture_active, pause_start_frame, prev_keypoints
+#     global motion_buffer, sequence, pause_buffer
+#     try:
+#         if 'file' not in request.files:
+#             return jsonify({'error': 'No file part in request'}), 400
+#         frame_file = request.files['file']
+#         frame_bytes = np.frombuffer(frame_file.read(), np.uint8)
+#         frame = cv2.imdecode(frame_bytes, cv2.IMREAD_COLOR)
+#         fps = 25  # Assume a fixed FPS or receive it from the client
+#         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+#         image.flags.writeable = False
+#         results = holistic.process(image)
+#         keypoints = extract_landmarks(results)
+#         motion = np.linalg.norm(keypoints - prev_keypoints) if prev_keypoints is not None else 0.0
+#         motion_buffer.append(motion)
+#         avg_motion = np.mean(motion_buffer)
+#         prediction = None
+#         if avg_motion >= MOTION_THRESHOLD:
+#             if pause_start_frame is not None:
+#                 pause_duration = (frame_idx - pause_start_frame) / fps
+#                 if pause_duration <= PAUSE_DURATION_SEC:
+#                     sequence.extend(pause_buffer)
+#                 else:
+#                     if len(sequence) >= MIN_SEQ_LEN:
+#                         gesture_seq = np.array(sequence)
+#                         pred_labels, D = recognize_sign(embedding_model, index, label_encoder, y_enc, gesture_seq)
+#                         prediction = pred_labels[0]
+#                     sequence = []
+#                 pause_buffer = []
+#                 pause_start_frame = None
+#             sequence.append(keypoints)
+#             gesture_active = True
+#         else:
+#             if gesture_active:
+#                 if pause_start_frame is None:
+#                     pause_start_frame = frame_idx
+#                 pause_buffer.append(keypoints)
+#         prev_keypoints = keypoints
+#         frame_idx += 1
+#         if gesture_active and pause_start_frame is not None:
+#             pause_duration = (frame_idx - pause_start_frame) / fps
+#             if pause_duration > PAUSE_DURATION_SEC:
+#                 if len(sequence) >= MIN_SEQ_LEN:
+#                     sequence.extend(pause_buffer)
+#                     gesture_seq = np.array(sequence)
+#                     pred_labels, D = recognize_sign(embedding_model, index, label_encoder, y_enc, gesture_seq)
+#                     prediction = pred_labels[0]
+#                 sequence = []
+#                 pause_buffer = []
+#                 pause_start_frame = None
+#                 gesture_active = False
+#         return jsonify({'prediction': prediction if prediction else 'No Gesture Detected'})
+#     except Exception as e:
+#         traceback.print_exc()
+#         return jsonify({'error': str(e)}), 500
+
+def process_frame_bytes_with_state(frame_bytes, state):
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file part in request'}), 400
-        frame_file = request.files['file']
-        frame_bytes = np.frombuffer(frame_file.read(), np.uint8)
-        frame = cv2.imdecode(frame_bytes, cv2.IMREAD_COLOR)
-        fps = 25  # Assume a fixed FPS or receive it from the client
+        frame = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
+        fps = 1  # Or get dynamically
         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image.flags.writeable = False
         results = holistic.process(image)
         keypoints = extract_landmarks(results)
-        motion = np.linalg.norm(keypoints - prev_keypoints) if prev_keypoints is not None else 0.0
-        motion_buffer.append(motion)
-        avg_motion = np.mean(motion_buffer)
+
+        motion = np.linalg.norm(keypoints - state['prev_keypoints']) if state['prev_keypoints'] is not None else 0.0
+        state['motion_buffer'].append(motion)
+        avg_motion = np.mean(state['motion_buffer'])
         prediction = None
+        
         if avg_motion >= MOTION_THRESHOLD:
-            if pause_start_frame is not None:
-                pause_duration = (frame_idx - pause_start_frame) / fps
+            if state['pause_start_frame'] is not None:
+                pause_duration = (state['frame_idx'] - state['pause_start_frame']) / fps
                 if pause_duration <= PAUSE_DURATION_SEC:
-                    sequence.extend(pause_buffer)
+                    state['sequence'].extend(state['pause_buffer'])
                 else:
-                    if len(sequence) >= MIN_SEQ_LEN:
-                        gesture_seq = np.array(sequence)
+                    if len(state['sequence']) >= MIN_SEQ_LEN:
+                        gesture_seq = np.array(state['sequence'])
                         pred_labels, D = recognize_sign(embedding_model, index, label_encoder, y_enc, gesture_seq)
                         prediction = pred_labels[0]
-                    sequence = []
-                pause_buffer = []
-                pause_start_frame = None
-            sequence.append(keypoints)
-            gesture_active = True
+                    state['sequence'] = []
+                state['pause_buffer'] = []
+                state['pause_start_frame'] = None
+            state['sequence'].append(keypoints)
+            state['gesture_active'] = True
         else:
-            if gesture_active:
-                if pause_start_frame is None:
-                    pause_start_frame = frame_idx
-                pause_buffer.append(keypoints)
-        prev_keypoints = keypoints
-        frame_idx += 1
-        if gesture_active and pause_start_frame is not None:
-            pause_duration = (frame_idx - pause_start_frame) / fps
+            if state['gesture_active']:
+                if state['pause_start_frame'] is None:
+                    state['pause_start_frame'] = state['frame_idx']
+                state['pause_buffer'].append(keypoints)
+        
+        print(f"Frame idx: {state['frame_idx']}, avg_motion: {avg_motion:.4f}, pause_start: {state['pause_start_frame']}, seq_len: {len(state['sequence'])}")
+        state['prev_keypoints'] = keypoints
+        state['frame_idx'] += 1
+        
+        if state['gesture_active'] and state['pause_start_frame'] is not None:
+            pause_duration = (state['frame_idx'] - state['pause_start_frame']) / fps
             if pause_duration > PAUSE_DURATION_SEC:
-                if len(sequence) >= MIN_SEQ_LEN:
-                    sequence.extend(pause_buffer)
-                    gesture_seq = np.array(sequence)
+                if len(state['sequence']) >= MIN_SEQ_LEN:
+                    state['sequence'].extend(state['pause_buffer'])
+                    gesture_seq = np.array(state['sequence'])
                     pred_labels, D = recognize_sign(embedding_model, index, label_encoder, y_enc, gesture_seq)
                     prediction = pred_labels[0]
-                sequence = []
-                pause_buffer = []
-                pause_start_frame = None
-                gesture_active = False
-        return jsonify({'prediction': prediction if prediction else 'No Gesture Detected'})
+                    emit('prediction', {'prediction': prediction})
+                    print(pred_labels)
+                state['sequence'] = []
+                state['pause_buffer'] = []
+                state['pause_start_frame'] = None
+                state['gesture_active'] = False
+        
+        return prediction if prediction else "No Gesture Detected"
     except Exception as e:
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-   
+        return f"Error: {str(e)}"
+@socketio.on('disconnect')
+def on_disconnect():
+    sid = request.sid
+    if sid in client_states:
+        del client_states[sid]
+
+@app.route('/predict_frame', methods=['POST'])
+def predict_frame():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part in request'}), 400
+    frame_file = request.files['file']
+    frame_bytes = frame_file.read()
+    prediction = process_frame_bytes(frame_bytes)
+    return jsonify({'prediction': prediction})
+
+
+# WebSocket route
+
+@socketio.on('frame')
+def on_frame(frame_bytes):
+    sid = request.sid  # unique client session ID
+    
+    if sid not in client_states:
+        client_states[sid] = init_client_state()
+    
+    state = client_states[sid]
+    print(sid)
+    prediction = process_frame_bytes_with_state(frame_bytes, state)
+    
+    # emit('prediction', {'prediction': prediction})
+
+
+# Avoid 404 on root
+@app.route('/')
+def index1():
+    return "Flask + SocketIO server is running."
+
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0")
+    import eventlet
+    import eventlet.wsgi
+    socketio.run(app, debug=True, host="0.0.0.0", port=5000)
